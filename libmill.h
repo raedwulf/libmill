@@ -595,6 +595,7 @@ MILL_EXPORT struct mill_sslsock *mill_ssllisten_(
     struct mill_ipaddr addr,
     const char *cert_file,
     const char *key_file,
+    const char *proto_list[],
     int backlog);
 MILL_EXPORT int mill_sslport_(
     struct mill_sslsock *s);
@@ -602,10 +603,14 @@ MILL_EXPORT struct mill_sslsock *mill_sslconnect_(
     struct mill_ipaddr addr,
     const char *cert_file,
     const char *key_file,
+    const char *server_name,
+    const char *proto_list[],
     int64_t deadline);
 MILL_EXPORT struct mill_sslsock *mill_sslaccept_(
     struct mill_sslsock *s,
     int64_t deadline);
+MILL_EXPORT const char *mill_sslproto_(
+    struct mill_sslsock *s);
 MILL_EXPORT struct mill_ipaddr mill_ssladdr_(
     struct mill_sslsock *s);
 MILL_EXPORT size_t mill_sslrecv_(

@@ -33,7 +33,7 @@
 
 coroutine void client(int port) {
     ipaddr addr = ipremote("127.0.0.1", port, 0, -1);
-    sslsock cs = sslconnect(addr, NULL, NULL, -1);
+    sslsock cs = sslconnect(addr, NULL, NULL, NULL, NULL, -1);
     assert(cs);
 
     char ipstr[16] = {0};
@@ -57,7 +57,7 @@ coroutine void client(int port) {
 
 coroutine void client2(int port) {
     ipaddr addr = ipremote("127.0.0.1", port, 0, -1);
-    sslsock conn = sslconnect(addr, NULL, NULL, -1);
+    sslsock conn = sslconnect(addr, NULL, NULL, NULL, NULL, -1);
     assert(conn);
     msleep(now() + 100);
     sslclose(conn);
@@ -67,7 +67,7 @@ coroutine void client2(int port) {
 int main() {
     char buf[16];
 
-    sslsock ls = ssllisten(iplocal(NULL, 5555, 0),
+    sslsock ls = ssllisten(iplocal(NULL, 5555, NULL, 0),
         "./tests/cert.pem", "./tests/key.pem", 10);
     assert(ls);
 
@@ -105,7 +105,7 @@ int main() {
     sslclose(ls);
 
     /* Test whether libmill performs correctly when faced with TCP pushback. */
-    ls = ssllisten(iplocal(NULL, 5555, 0),
+    ls = ssllisten(iplocal(NULL, 5555, NULL, 0),
         "./tests/cert.pem", "./tests/key.pem", 10);
     go(client2(5555));
     as = sslaccept(ls, -1);

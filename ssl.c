@@ -24,6 +24,7 @@
 
 #if defined HAVE_SSL
 
+#include <arpa/inet.h>
 #include <openssl/bio.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -47,16 +48,30 @@ struct mill_sslsock {
     enum mill_ssltype type;
 };
 
+struct mill_sslnextproto {
+    /* TODO: 64 enough (common usecase would be http/2 which currently only has
+     * http/1.1 & h2 = 12 bytes)? or dynamically allocate
+     * Currently, data is only used on client-side connections.
+     */
+    uint8_t data[64];
+    size_t len;
+    int status;
+    char selected[64];
+};
+
 struct mill_ssllistener {
     struct mill_sslsock sock;
     tcpsock s;
     SSL_CTX *ctx;
+    struct mill_sslnextproto np;
 };
 
 struct mill_sslconn {
     struct mill_sslsock sock;
     tcpsock s;
+    SSL_CTX *ctx;
     BIO *bio;
+    struct mill_sslnextproto np;
 };
 
 /* Initialise OpenSSL library. */
@@ -69,17 +84,75 @@ static void ssl_init(void) {
     SSL_library_init();
 
     /* TODO: Move to sslconnect() */
-    ssl_cli_ctx = SSL_CTX_new(SSLv23_client_method());
-    mill_assert(ssl_cli_ctx);
+}
+
+static int mill_nextprotocb(SSL *ssl, const uint8_t **data, uint32_t *len, void *arg) {
+    struct mill_sslnextproto *np = arg;
+    *data = np->data;
+    *len = (uint32_t) np->len;
+    return SSL_TLSEXT_ERR_OK;
+}
+
+/* Inconsistent OpenSSL API... one forgot const-correctness */
+static int mill_selectprotocb_(SSL* ssl, uint8_t **out, uint8_t *outlen,
+      const uint8_t *in, uint32_t inlen, void *arg) {
+    struct mill_sslnextproto *np = arg;
+    np->status = SSL_select_next_proto(out, outlen, in, inlen, np->data, np->len);
+    if (np->status == OPENSSL_NPN_NO_OVERLAP) {
+        np->selected[0] = '\0';
+        return SSL_TLSEXT_ERR_NOACK;
+    }
+    mill_assert(*outlen < sizeof(np->selected));
+    memcpy(np->selected, out + 1, *outlen - 1);
+    np->selected[*outlen - 1] = '\0';
+    return SSL_TLSEXT_ERR_OK;
+}
+
+static int mill_selectprotocb(SSL* ssl, const uint8_t **out, uint8_t *outlen,
+      const uint8_t *in, uint32_t inlen, void *arg) {
+    struct mill_sslnextproto *np = arg;
+    np->status = SSL_select_next_proto((uint8_t **)out, outlen, in, inlen, np->data, np->len);
+    if (np->status == OPENSSL_NPN_NO_OVERLAP) {
+        np->selected[0] = '\0';
+        return SSL_TLSEXT_ERR_NOACK;
+    }
+    mill_assert(*outlen < sizeof(np->selected));
+    memcpy(np->selected, out + 1, *outlen - 1);
+    np->selected[*outlen - 1] = '\0';
+    return SSL_TLSEXT_ERR_OK;
+}
+
+static int mill_make_np(struct mill_sslnextproto *np, const char *proto_list[]) {
+    int i = 0;
+    const char **p = proto_list;
+    np->len = 0;
+    while (*p) {
+        if(i >= sizeof(np->data))
+            return -1;
+        np->data[i] = strlen(*p);
+        if(i + 1 + np->data[i] >= sizeof(np->data))
+            return -1;
+        memcpy(np->data + i + 1, *p, np->data[i]);
+        i += 1 + np->data[i];
+        np->len += np->data[i];
+        p++;
+    }
+    return np->len;
 }
 
 struct mill_sslsock *mill_ssllisten_(struct mill_ipaddr addr,
-      const char *cert_file, const char *key_file, int backlog) {
+      const char *cert_file, const char *key_file,
+      const char *proto_list[], int backlog) {
     ssl_init();
-    /* Load certificates. */
+    /* Create context */
     SSL_CTX *ctx = SSL_CTX_new(SSLv23_server_method());
     if(!ctx)
         return NULL;
+    /* Sensible default options for security */
+    SSL_CTX_set_options(ctx, SSL_OP_ALL | SSL_OP_NO_SSLv2 |
+                        SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION |
+                        SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
+    /* Load certificates. */
     if(cert_file && SSL_CTX_use_certificate_chain_file(ctx, cert_file) <= 0)
         return NULL;
     if(key_file && SSL_CTX_use_PrivateKey_file(ctx,
@@ -106,6 +179,25 @@ struct mill_sslsock *mill_ssllisten_(struct mill_ipaddr addr,
     l->s = s;
     l->ctx = ctx;
     errno = 0;
+    /* If proto list is provided, enable ALPN */
+    l->np.len = 0;
+    if(proto_list) {
+            /* Generate in-protocol format */
+            int rc = mill_make_np(&l->np, proto_list);
+            if (rc < 0) {
+                /* TODO: close the context */
+                return NULL;
+            } else if (rc == 0) {
+                /* no protocols to negotiate */
+                return &l->sock;
+            }
+            /* Advertise the protocol */
+            SSL_CTX_set_next_protos_advertised_cb(ctx, mill_nextprotocb, &l->np);
+            /* If OpenSSL 1.02, also support ALPN selection */
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+            SSL_CTX_set_alpn_select_cb(ctx, mill_selectprotocb, &l->np);
+#endif
+    }
     return &l->sock;
 }
 
@@ -174,7 +266,7 @@ void mill_sslclose_(struct mill_sslsock *s) {
     errno = 0;
 }
 
-static struct mill_sslsock *ssl_conn_new(tcpsock s, SSL_CTX *ctx, int client) {
+static struct mill_sslconn *ssl_conn_new(tcpsock s, SSL_CTX *ctx, int client, const char *server_name) {
     mill_assert(ctx);
     SSL *ssl = NULL;
     BIO *sbio = BIO_new_ssl(ctx, client);
@@ -192,12 +284,21 @@ static struct mill_sslsock *ssl_conn_new(tcpsock s, SSL_CTX *ctx, int client) {
     if(!cbio) {
         BIO_free(sbio);
         return NULL;
-    } 
+    }
     BIO_push(sbio, cbio);
     struct mill_sslconn *c = malloc(sizeof (struct mill_sslconn));
     if(!c) {
         BIO_free_all(sbio);
         return NULL;
+    }
+
+    /* RFC4366 (SNI) */
+    char buf[sizeof(struct in6_addr)];
+    if(server_name &&
+      inet_pton(AF_INET, server_name, &buf) != 1 &&
+      inet_pton(AF_INET6, server_name, &buf) != 1) {
+        if (SSL_set_tlsext_host_name(ssl, server_name) == 0)
+            return NULL;
     }
 
     /*  mill_assert(BIO_get_fd(sbio, NULL) == fd); */
@@ -206,7 +307,7 @@ static struct mill_sslsock *ssl_conn_new(tcpsock s, SSL_CTX *ctx, int client) {
     c->bio = sbio;
     c->s = s;
     /* OPTIONAL: call ssl_handshake() to check/verify peer certificate */
-    return &c->sock;
+    return c;
 }
 
 size_t mill_sslrecv_(struct mill_sslsock *s, void *buf, int len,
@@ -287,18 +388,50 @@ void mill_sslflush_(struct mill_sslsock *s, int64_t deadline) {
 }
 
 struct mill_sslsock *mill_sslconnect_(struct mill_ipaddr addr,
-    const char *cert_file, const char *key_file, int64_t deadline) {
+    const char *cert_file, const char *key_file, const char *server_name,
+    const char *proto_list[], int64_t deadline) {
     ssl_init();
-    tcpsock sock = tcpconnect(addr, deadline);
-    if(!sock)
+    /* NPN and ALPN are unique to context */
+    SSL_CTX *ctx = SSL_CTX_new(SSLv23_client_method());
+    if(!ctx)
         return NULL;
-    struct mill_sslsock *c = ssl_conn_new(sock, ssl_cli_ctx, 1);
+    /* Sensible default options for security */
+    SSL_CTX_set_options(ctx, SSL_OP_ALL | SSL_OP_NO_SSLv2 |
+                        SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION |
+                        SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
+    tcpsock sock = tcpconnect(addr, deadline);
+    if(!sock) {
+        /* TODO: close the context */
+        return NULL;
+    }
+    struct mill_sslconn *c = ssl_conn_new(sock, ctx, 1, server_name);
     if(!c) {
+        /* TODO: close the context */
         tcpclose(sock);
         errno = ENOMEM;
         return NULL;
     }
-    return c;
+    /* If proto list is provided, enable ALPN */
+    c->np.len = 0;
+    if(proto_list) {
+        /* Generate in-protocol format */
+        int rc = mill_make_np(&c->np, proto_list);
+        if (rc < 0) {
+            /* TODO: close the context */
+            tcpclose(sock);
+            return NULL;
+        } else if (rc == 0) {
+            /* no protocols to negotiate */
+            return &c->sock;
+        }
+        /* Advertise the protocol */
+        SSL_CTX_set_next_proto_select_cb(ctx, mill_selectprotocb_, &c->np);
+        /* If OpenSSL 1.02, also support ALPN selection */
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+        SSL_CTX_set_alpn_protos(ctx, c->np.data, c->np.len);
+#endif
+    }
+    return &c->sock;
 }
 
 struct mill_sslsock *mill_sslaccept_(struct mill_sslsock *s, int64_t deadline) {
@@ -308,13 +441,17 @@ struct mill_sslsock *mill_sslaccept_(struct mill_sslsock *s, int64_t deadline) {
     tcpsock sock = tcpaccept(l->s, deadline);
     if(!sock)
         return NULL;
-    struct mill_sslsock *c = ssl_conn_new(sock, l->ctx, 0);
+    struct mill_sslconn *c = ssl_conn_new(sock, l->ctx, 0, NULL);
     if(!c) {
         tcpclose(sock);
         errno = ENOMEM;
         return NULL;
     }
-    return c;
+    return &c->sock;
+}
+
+const char *mill_sslproto_(struct mill_sslsock *s) {
+    return ((struct mill_sslconn *)s)->np.selected;
 }
 
 ipaddr mill_ssladdr_(struct mill_sslsock *s) {
