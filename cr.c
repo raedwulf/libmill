@@ -112,9 +112,8 @@ int mill_suspend(void) {
     }
     /* Store the context of the current coroutine, if any. */
     if(mill_running) {
-        uint64_t rc;
-        mill_setjmp_(mill_getctx_(), rc);
-        if (rc)
+        mill_ctx ctx = mill_getctx_();
+        if (mill_setjmp_(ctx))
             return mill_running->result;
     }
     while(1) {
@@ -135,7 +134,7 @@ int mill_suspend(void) {
     }
 }
 
-void mill_resume(struct mill_cr *cr, int result) {
+inline void mill_resume(struct mill_cr *cr, int result) {
     mill_assert(!cr->is_ready);
     cr->result = result;
     cr->state = MILL_READY;
