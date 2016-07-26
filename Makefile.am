@@ -46,7 +46,6 @@ libmill_la_SOURCES = \
     poller.h \
     poller.c \
     slist.h \
-    slist.c \
     stack.h \
     stack.c \
     tcp.c \

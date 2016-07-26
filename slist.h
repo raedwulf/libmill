@@ -38,7 +38,12 @@ struct mill_slist {
 };
 
 /* Initialise the list. To statically initialise the list use = {0}. */
-void mill_slist_init(struct mill_slist *self);
+//void mill_slist_init(struct mill_slist *self);
+#define mill_slist_init(self)\
+    do {\
+        (self)->first = NULL;\
+        (self)->last = NULL;\
+    } while(0)
 
 /* True is the list has no items. */
 #define mill_slist_empty(self) (!((self)->first))
@@ -52,14 +57,35 @@ void mill_slist_init(struct mill_slist *self);
 #define mill_slist_next(it) ((it)->next)
 
 /* Push the item to the beginning of the list. */
-void mill_slist_push(struct mill_slist *self, struct mill_slist_item *item);
+#define mill_slist_push(self, item)\
+    do {\
+        (item)->next = (self)->first;\
+        (self)->first = (item);\
+        if(!(self)->last)\
+            (self)->last = (item);\
+    } while(0)
 
 /* Push the item to the end of the list. */
-void mill_slist_push_back(struct mill_slist *self,
-    struct mill_slist_item *item);
+#define mill_slist_push_back(self, item)\
+    do {\
+        (item)->next = NULL;\
+        if(!(self)->last)\
+            (self)->first = (item);\
+        else\
+            (self)->last->next = (item);\
+        (self)->last = (item);\
+    } while(0)
 
-/* Pop an item from the beginning of the list. */
-struct mill_slist_item *mill_slist_pop(struct mill_slist *self);
+#define mill_slist_pop(self)\
+    ({\
+        struct mill_slist_item *it = NULL;\
+        if((self)->first) {\
+            it = (self)->first;\
+            (self)->first = (self)->first->next;\
+            if(!(self)->first)\
+                (self)->last = NULL;\
+        }\
+        it;\
+    })
 
 #endif
-
