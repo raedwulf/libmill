@@ -154,6 +154,13 @@ MILL_EXPORT void mill_setcls_(
 
 
 #if defined(__x86_64__)
+#if defined(__AVX__)
+#define MILL_CLOBBER \
+        , "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7",\
+        "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15"
+#else
+#define MILL_CLOBBER
+#endif
 #define mill_setjmp_(ctx) ({\
     int ret;\
     asm("lea     LJMPRET%=(%%rip), %%rcx\n\t"\
@@ -173,9 +180,8 @@ MILL_EXPORT void mill_setcls_(
         : "d" (ctx)\
         : "rcx", "r8", "r9", "r10", "r11",\
           "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",\
-          "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",\
-          "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7",\
-          "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15"\
+          "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"\
+          MILL_CLOBBER\
           );\
     ret;\
 })
