@@ -38,7 +38,6 @@ struct mill_slist {
 };
 
 /* Initialise the list. To statically initialise the list use = {0}. */
-//void mill_slist_init(struct mill_slist *self);
 #define mill_slist_init(self)\
     do {\
         (self)->first = NULL;\
